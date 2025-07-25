@@ -1,0 +1,5 @@
+Flask
+tweepy
+APScheduler
+gunicorn
+requests
