@@ -139,6 +139,52 @@ def post_tweet():
 
     return jsonify({'tweet_id': tweet_id, 'delete_time': delete_time.isoformat()})
 
+# --- 一括削除API ---
+@app.route('/delete_old', methods=['POST'])
+def delete_old():
+    """
+    指定した時間より前に投稿されたツイートを一括削除するエンドポイント。
+    リクエストボディがJSON形式の場合は "hours" フィールドを取得して削除対象期間を決めます。
+    指定がない場合はデフォルトで12時間より前に投稿されたツイートを削除します。
+    自分でいいねしているツイートは削除しません。
+    削除したツイートIDのリストをJSONで返します。
+    """
+    # JSONボディがあれば hours を取得、なければデフォルト値を使用
+    hours = 12
+    if request.is_json:
+        try:
+            hours = int(request.json.get('hours', hours))
+        except (ValueError, TypeError):
+            pass
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    deleted = []
+    try:
+        # 最新200件ほど取得（必要に応じて調整）
+        tweets = api.user_timeline(count=200, include_rts=False)
+        for tweet in tweets:
+            # cutoffより前に投稿され、かつ自分がいいねしていないツイートを削除
+            if tweet.created_at < cutoff and not tweet.favorited:
+                # インプレッション数が1万以上の場合は削除対象から除外する
+                impressions = 0
+                try:
+                    impressions = get_impression(tweet.id)
+                except Exception as e:
+                    # 取得に失敗した場合は0として扱う
+                    print(f"Error getting impressions for tweet {tweet.id}: {e}")
+                if impressions >= 10000:
+                    # 人気ツイートなので削除しない
+                    continue
+                try:
+                    api.destroy_status(tweet.id)
+                    # スケジュールに登録されていれば削除
+                    remove_tweet_schedule(tweet.id)
+                    deleted.append(tweet.id)
+                except Exception as e:
+                    print(f"Error deleting tweet {tweet.id}: {e}")
+    except Exception as e:
+        print(f"Error fetching timeline for bulk delete: {e}")
+    return jsonify({'deleted_ids': deleted})
+
 # --- 起動時に保存済みジョブを復元 ---
 def reschedule_all():
     data = load_all_schedules()
