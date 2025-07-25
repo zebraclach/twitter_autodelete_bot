@@ -6,7 +6,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import requests
 
-# 環境変数からAPIキーを取得
+# 環境変数から API キー類を取得
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
@@ -17,56 +17,50 @@ app = Flask(__name__)
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-# Tweepy認証
+# Tweepy v1.1 認証（ユーザータイムライン取得に利用）
 auth = tweepy.OAuth1UserHandler(API_KEY, API_SECRET, ACCESS_TOKEN, ACCESS_TOKEN_SECRET)
 api = tweepy.API(auth)
 
 TWEET_STORE_FILE = "tweet_store.json"
 
-# --- 保存・読込関数 ---
-def save_tweet_schedule(tweet_id: int, delete_time: datetime) -> None:
-    """投稿したツイートの削除予定時刻をファイルに保存する"""
-    data = load_all_schedules()
-    data[str(tweet_id)] = delete_time.isoformat()
-    with open(TWEET_STORE_FILE, "w") as f:
-        json.dump(data, f)
-
-def load_all_schedules() -> dict:
-    """保存済みスケジュールをすべて読み込む"""
+# --- スケジュール保存・読込関連 ---
+def load_all_schedules():
     if not os.path.exists(TWEET_STORE_FILE):
         return {}
     with open(TWEET_STORE_FILE, "r") as f:
         return json.load(f)
 
-def remove_tweet_schedule(tweet_id: int) -> None:
-    """削除済みツイートをストアから取り除く"""
-    data = load_all_schedules()
-    data.pop(str(tweet_id), None)
+def save_all_schedules(data):
     with open(TWEET_STORE_FILE, "w") as f:
         json.dump(data, f)
 
-# --- いいね判定 ---
-def is_liked_by_me(tweet_id: int) -> bool:
-    """自分がそのツイートにいいねしているか確認する"""
-    tweet = api.get_status(tweet_id)
-    return getattr(tweet, 'favorited', False)
+def save_tweet_schedule(tweet_id, delete_time):
+    data = load_all_schedules()
+    data[str(tweet_id)] = delete_time.isoformat()
+    save_all_schedules(data)
 
-# --- インプレッション取得 ---
-def get_impression(tweet_id: int) -> int:
-    """ツイートのインプレッション数を取得する (v2 API)"""
+def remove_tweet_schedule(tweet_id):
+    data = load_all_schedules()
+    data.pop(str(tweet_id), None)
+    save_all_schedules(data)
+
+# --- いいね判定 ---
+def is_liked_by_me(tweet_id):
+    tweet = api.get_status(tweet_id)
+    return tweet.favorited
+
+# --- インプレッション取得（v2 API） ---
+def get_impression(tweet_id):
     url = f"https://api.twitter.com/2/tweets/{tweet_id}?tweet.fields=public_metrics"
     headers = {"Authorization": f"Bearer {BEARER_TOKEN}"}
     res = requests.get(url, headers=headers)
-    if not res.ok:
-        return 0
     data = res.json()
-    return data.get("data", {}).get("public_metrics", {}).get("impression_count", 0)
+    return data["data"]["public_metrics"].get("impression_count", 0)
 
 # --- ツイート削除処理 ---
-def delete_tweet(tweet_id: int) -> None:
-    """ツイートを削除する。ただし自分がいいねしたものはスキップ"""
+def delete_tweet(tweet_id):
+    # 自分でいいねしている場合は削除しない
     if is_liked_by_me(tweet_id):
-        # 自分でいいねした場合は削除せず終了
         print(f"Skipped delete (liked): {tweet_id}")
         return
     try:
@@ -76,61 +70,88 @@ def delete_tweet(tweet_id: int) -> None:
     except Exception as e:
         print(f"Error deleting tweet {tweet_id}: {e}")
 
-# --- 12時間後の削除ジョブ ---
-def schedule_delete(tweet_id: int, delete_time: datetime) -> None:
-    """指定時刻にツイートを削除するジョブを登録"""
+# --- 削除ジョブ登録 ---
+def schedule_delete(tweet_id, delete_time):
     scheduler.add_job(delete_tweet, 'date', run_date=delete_time, args=[tweet_id])
     save_tweet_schedule(tweet_id, delete_time)
 
-# --- インプレッション監視ジョブ（10分ごと） ---
-def monitor_impressions() -> None:
-    """登録済みツイートのインプレッションを監視し、規定値を超えたら即削除"""
+# --- 手動ツイート検出・登録 ---
+def detect_and_schedule_manual_tweets():
+    """
+    自分の最新ツイートを取得し、まだ登録していないものに対して
+    12 時間後の削除ジョブを追加する。
+    """
+    try:
+        # 最新50件ほど取得（必要に応じて調整）
+        tweets = api.user_timeline(count=50, include_rts=False)
+    except Exception as e:
+        print(f"Error fetching timeline: {e}")
+        return
+
+    existing = load_all_schedules()
+    now = datetime.utcnow()
+    for tweet in tweets:
+        tid_str = str(tweet.id)
+        # 既に登録済みの場合はスキップ
+        if tid_str in existing:
+            continue
+        # ツイート作成時刻（UTC）から 12 時間後を計算
+        created_at = tweet.created_at  # UTC datetime
+        delete_time = created_at + timedelta(hours=12)
+        # 12時間以内のものだけ登録
+        if delete_time > now:
+            print(f"Scheduling manual tweet {tid_str} for deletion at {delete_time}")
+            schedule_delete(tweet.id, delete_time)
+
+# --- インプレッション監視 ---
+def monitor_impressions_and_detect():
+    """
+    登録済みツイートのインプレッションを監視し、1000を超えたら削除。
+    あわせて新しい手動ツイートの検出も行う。
+    """
+    # 新しい手動ツイートを検出
+    detect_and_schedule_manual_tweets()
+
     data = load_all_schedules()
-    for tweet_id_str in list(data.keys()):
-        tweet_id = int(tweet_id_str)
-        impressions = get_impression(tweet_id)
-        print(f"Tweet {tweet_id} impressions: {impressions}")
+    for tid_str in list(data.keys()):
+        impressions = get_impression(tid_str)
+        print(f"Tweet {tid_str} impressions: {impressions}")
         if impressions >= 1000:
-            if not is_liked_by_me(tweet_id):
-                delete_tweet(tweet_id)
+            if not is_liked_by_me(int(tid_str)):
+                delete_tweet(int(tid_str))
 
-# 10分ごとにインプレッション監視
-scheduler.add_job(monitor_impressions, 'interval', minutes=10)
+# 10分ごとに監視ジョブを実行
+scheduler.add_job(monitor_impressions_and_detect, 'interval', minutes=10)
 
-# --- ツイート投稿API ---
+# --- 投稿API（以前と同じ） ---
 @app.route('/tweet', methods=['POST'])
 def post_tweet():
-    """POST /tweet エンドポイント。受け取ったテキストを投稿し、削除をスケジュール"""
     text = request.json.get('text')
     if not text:
         return jsonify({'error': 'No text provided'}), 400
 
-    # ツイート投稿
     tweet = api.update_status(text)
     tweet_id = tweet.id
 
-    # 12時間後に削除をスケジュール
-    delete_time = datetime.now() + timedelta(hours=12)
+    # 12時間後に削除予約
+    delete_time = datetime.utcnow() + timedelta(hours=12)
     schedule_delete(tweet_id, delete_time)
 
     return jsonify({'tweet_id': tweet_id, 'delete_time': delete_time.isoformat()})
 
-# --- サーバ起動時に残タスク復元 ---
-def reschedule_all() -> None:
-    """保存済みの削除予定を復元し、必要に応じて即時削除"""
+# --- 起動時に保存済みジョブを復元 ---
+def reschedule_all():
     data = load_all_schedules()
-    now = datetime.now()
-    for tweet_id_str, time_str in data.items():
-        tweet_id = int(tweet_id_str)
+    now = datetime.utcnow()
+    for tid_str, time_str in data.items():
         dt = datetime.fromisoformat(time_str)
+        # まだ先の削除スケジュールなら再登録、過ぎていたら即削除
         if dt > now:
-            schedule_delete(tweet_id, dt)
+            scheduler.add_job(delete_tweet, 'date', run_date=dt, args=[int(tid_str)])
         else:
-            # 予定時刻を過ぎていた場合は削除
-            delete_tweet(tweet_id)
+            delete_tweet(int(tid_str))
 
 if __name__ == '__main__':
-    # アプリ起動時に保存済みのジョブを復元
     reschedule_all()
-    # Flaskアプリ起動
+    # Renderでは0.0.0.0:10000で起動する設定
     app.run(host='0.0.0.0', port=10000)
