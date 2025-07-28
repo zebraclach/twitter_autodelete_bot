@@ -103,11 +103,11 @@ def detect_and_schedule_manual_tweets():
             print(f"Scheduling manual tweet {tid_str} for deletion at {delete_time}")
             schedule_delete(tweet.id, delete_time)
                     else:
-                    # Tweet is older than 12 hours; delete immediately if not liked and under 10000 impressions
-                impressions = get_impression(tweet.id)
-            if         impressions < 10000 and not is_liked_by_me(tweet.id):
-                        print(f"Deleting old manual tweet {tid_str} immediately (impressions: {impressions})")
-                delete_tweet(tweet.id)
+                         # Tweet is older than 12 hours; delete immediately if not liked and under 10000 impressions
+            impressions = get_impression(tweet.id)
+            if impressions < 10000 and not is_liked_by_me(tweet.id):
+                print(f"Deleting old manual tweet {tid_str} immediately (impressions: {impressions})")
+                detee_tweet(tweet.id)
 
 
 # --- インプレッション監視 ---
