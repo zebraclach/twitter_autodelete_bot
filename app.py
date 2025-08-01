@@ -203,6 +203,10 @@ def reschedule_all() -> None:
             if impressions < 10000 and not is_liked_by_me(tid):
                 delete_tweet(tid)
 
+# Initialize schedules when module is imported (for gunicorn)
+reschedule_all()
+detect_and_schedule_manual_tweets()
+
 if __name__ == "__main__":
     # Restore schedules and process past tweets on startup
     reschedule_all()
